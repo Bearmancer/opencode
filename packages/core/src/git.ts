@@ -462,12 +462,13 @@ const layer = Layer.effect(
       ignores?: Repository
       maximumUntrackedFileBytes?: number
       index?: string
+      excluded?: ReadonlySet<RelativePath>
     }) {
       const candidates = [...input.changes.tracked, ...input.changes.untracked]
       if (!candidates.length) return { skipped: [] }
-      const excluded = input.ignores
-        ? yield* ignored({ repository: input.ignores, paths: candidates })
-        : new Set<RelativePath>()
+      const excluded =
+        input.excluded ??
+        (input.ignores ? yield* ignored({ repository: input.ignores, paths: candidates }) : new Set<RelativePath>())
       const maximum = input.maximumUntrackedFileBytes
       const skipped = maximum
         ? (yield* Effect.forEach(
@@ -482,7 +483,8 @@ const layer = Layer.effect(
         : []
       const skip = new Set(skipped)
       const added = candidates.filter((item) => !excluded.has(item) && !skip.has(item))
-      const removed = [...excluded, ...skipped]
+      // Untracked paths are not in the index, so only tracked paths that are now ignored need removing.
+      const removed = input.changes.tracked.filter((item) => excluded.has(item))
       // update-index takes literal paths, so large lists avoid add's quadratic pathspec matching.
       if (removed.length)
         yield* repositoryOperation("refresh", input.repository, ["update-index", "--force-remove", "-z", "--stdin"], {
@@ -666,13 +668,16 @@ const layer = Layer.effect(
             concurrency: "unbounded",
           })
           const last = lastCaptures.get(input.repository.gitDirectory)
-          if (
-            scanned &&
-            last?.fingerprint === scanned &&
-            changes.every((change) => !change.tracked.length && !change.untracked.length)
-          )
-            return last.tree
-          yield* Effect.forEach(changes, (change) => updateIndex({ ...input, changes: change, index }), {
+          const untracked = changes.flatMap((change) => change.untracked)
+          // Paths the source ignores are listed as untracked on every scan; they leave the index unchanged.
+          const excluded =
+            scanned && last?.fingerprint === scanned && changes.every((change) => !change.tracked.length)
+              ? input.ignores
+                ? yield* ignored({ repository: input.ignores, paths: untracked })
+                : new Set<RelativePath>()
+              : undefined
+          if (last && excluded && untracked.every((file) => excluded.has(file))) return last.tree
+          yield* Effect.forEach(changes, (change) => updateIndex({ ...input, changes: change, index, excluded }), {
             discard: true,
           })
           return yield* writeTree(input.repository, index)
