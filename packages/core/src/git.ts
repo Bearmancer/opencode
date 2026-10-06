@@ -44,6 +44,8 @@ export type TreeID = typeof TreeID.Type
 
 const temporaryIndexPrefix = "index.opencode-"
 // Like `git gc --auto`, pack once loose objects accumulate, and combine packs before lookups slow down.
+// Room below Windows' 32,767-character command line for the Git path, repository flags, and quoting.
+const argumentBudget = 24_000
 const looseObjectLimit = 2048
 const packCountLimit = 16
 
@@ -801,6 +803,9 @@ const layer = Layer.effect(
      * Three batched invocations over the tree pair instead of three per file. An
      * explicit empty selection diffs nothing; an absent one diffs every changed path.
      * Patch output is capped like VCS diffs: files past the cap get an empty patch.
+     * A selection too long for one Windows command line is diffed in groups that
+     * share the patch cap; Git orders output by path, so the groups concatenate in
+     * the order a single call would produce.
      */
     const treeDiff = Effect.fn("Git.tree.diff")(function* (input: {
       repository: Repository
@@ -810,6 +815,21 @@ const layer = Layer.effect(
       paths?: readonly RelativePath[]
     }) {
       if (input.paths?.length === 0) return []
+      const groups = input.paths ? pathGroups(input.paths) : [undefined]
+      const diffs: FileDiff.Info[] = []
+      let patchBudget = VcsPatch.MAX_TOTAL_PATCH_BYTES
+      for (const paths of groups) {
+        const group = yield* diffGroup({ ...input, paths }, patchBudget)
+        diffs.push(...group.diffs)
+        patchBudget = group.truncated ? 0 : patchBudget - group.patchBytes
+      }
+      return diffs
+    })
+
+    const diffGroup = Effect.fnUntraced(function* (
+      input: { repository: Repository; from: TreeID; to: TreeID; context?: number; paths?: readonly RelativePath[] },
+      patchBudget: number,
+    ) {
       const args = ["--no-renames", input.from, input.to, "--", ...(input.paths ?? [])]
       // Patch headers have no -z form: unquoted paths keep chunksByFile matching non-ASCII names.
       const [names, numbers, patch] = yield* Effect.all(
@@ -822,20 +842,22 @@ const layer = Layer.effect(
             ...args,
           ]),
           repositoryOperation("diff", input.repository, ["--literal-pathspecs", "diff", "--numstat", "-z", ...args]),
-          repositoryOperation(
-            "diff",
-            input.repository,
-            [
-              "--literal-pathspecs",
-              "-c",
-              "core.quotepath=false",
-              "diff",
-              "--no-ext-diff",
-              `--unified=${input.context ?? 3}`,
-              ...args,
-            ],
-            { maxOutputBytes: VcsPatch.MAX_TOTAL_PATCH_BYTES },
-          ),
+          patchBudget > 0
+            ? repositoryOperation(
+                "diff",
+                input.repository,
+                [
+                  "--literal-pathspecs",
+                  "-c",
+                  "core.quotepath=false",
+                  "diff",
+                  "--no-ext-diff",
+                  `--unified=${input.context ?? 3}`,
+                  ...args,
+                ],
+                { maxOutputBytes: patchBudget },
+              )
+            : Effect.succeed({ text: "", stderr: "", truncated: true }),
         ],
         { concurrency: 3 },
       )
@@ -865,15 +887,19 @@ const layer = Layer.effect(
         }),
       )
       const patches = VcsPatch.chunksByFile(patch, (index) => files[index]?.file)
-      return files.map((entry) => {
-        const stat = stats.get(entry.file)
-        return {
-          ...entry,
-          additions: stat?.additions ?? 0,
-          deletions: stat?.deletions ?? 0,
-          patch: stat?.binary ? "" : (patches.get(entry.file) ?? VcsPatch.emptyPatch(entry.file)),
-        } satisfies FileDiff.Info
-      })
+      return {
+        diffs: files.map((entry) => {
+          const stat = stats.get(entry.file)
+          return {
+            ...entry,
+            additions: stat?.additions ?? 0,
+            deletions: stat?.deletions ?? 0,
+            patch: stat?.binary ? "" : (patches.get(entry.file) ?? VcsPatch.emptyPatch(entry.file)),
+          } satisfies FileDiff.Info
+        }),
+        patchBytes: Buffer.byteLength(patch.text),
+        truncated: patch.truncated,
+      }
     })
 
     const hasEntry = Effect.fnUntraced(function* (repository: Repository, tree: TreeID, file: RelativePath) {
@@ -917,7 +943,7 @@ const layer = Layer.effect(
       files: readonly RelativePath[],
     ) {
       const pathspecs = files.map(literalPathspec)
-      const fits = pathspecs.reduce((length, pathspec) => length + pathspec.length + 1, 0) <= 24_000
+      const fits = pathspecs.reduce((length, pathspec) => length + pathspec.length + 1, 0) <= argumentBudget
       const result = yield* repositoryOperation(
         "restore",
         repository,
@@ -1351,6 +1377,29 @@ function packIndexObjectIDs(bytes: Uint8Array) {
   return Array.from({ length: count }, (_, index) =>
     Buffer.from(bytes.subarray(1032 + index * hash, 1032 + (index + 1) * hash)).toString("hex"),
   )
+}
+
+/**
+ * Windows caps a command line at 32,767 characters; elsewhere one call takes any
+ * selection. Groups are sorted by bytes, the order Git prints paths in, and each
+ * path is counted with room for the quotes Windows adds around spaces.
+ */
+function pathGroups(paths: readonly RelativePath[]) {
+  if (process.platform !== "win32") return [paths]
+  return paths
+    .toSorted((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)))
+    .reduce<{ groups: RelativePath[][]; length: number }>(
+      (state, file) => {
+        const cost = file.length + 3
+        const current = state.groups.at(-1)
+        if (current && state.length + cost <= argumentBudget) {
+          current.push(file)
+          return { groups: state.groups, length: state.length + cost }
+        }
+        return { groups: [...state.groups, [file]], length: cost }
+      },
+      { groups: [], length: 0 },
+    ).groups
 }
 
 function uniqueSuffix() {

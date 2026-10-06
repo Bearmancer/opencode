@@ -266,7 +266,7 @@ describe("Snapshot", () => {
     ),
   )
 
-  testEffect(Layer.empty).live("restores a selection too long for one command line", () =>
+  testEffect(Layer.empty).live("restores and diffs a selection too long for one command line", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
       (tmp) =>
@@ -285,6 +285,17 @@ describe("Snapshot", () => {
             yield* Effect.promise(() =>
               Promise.all(names.map((name) => fs.writeFile(path.join(project, name), "two\n"))),
             )
+            const second = yield* snapshot.capture()
+            if (!second) throw new globalThis.Error("capture failed")
+            const diffs = yield* snapshot.diff({
+              from: first,
+              to: second,
+              paths: names.map((name) => RelativePath.make(name)),
+            })
+            expect(diffs.map((diff) => diff.file).toSorted()).toEqual(names.toSorted())
+            expect(
+              diffs.every((diff) => diff.additions === 1 && diff.deletions === 1 && diff.patch.includes("+two")),
+            ).toBe(true)
             yield* snapshot.restore({ files: new Map(names.map((name) => [RelativePath.make(name), first])) })
             const contents = yield* Effect.forEach(names, (name) => read(path.join(project, name)))
             expect(new Set(contents)).toEqual(new Set(["one\n"]))
