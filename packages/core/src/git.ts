@@ -491,18 +491,8 @@ const layer = Layer.effect(
           stdin: removed.join("\0") + "\0",
           index: input.index,
         })
-      const add = (paths: readonly RelativePath[]) =>
-        repositoryOperation(
-          "refresh",
-          input.repository,
-          ["update-index", "--add", "--remove", "--replace", "-z", "--stdin"],
-          {
-            stdin: paths.join("\0") + "\0",
-            index: input.index,
-          },
-        )
-      if (added.length) yield* add(added)
-      // update-index drops a tracked file replaced by an embedded repository; only a second pass records its gitlink.
+      // update-index drops a tracked file replaced by an embedded repository; a second line for the same path,
+      // in the same call, records its gitlink. For a path that already is a gitlink the repeat is a no-op.
       const embedded = (yield* Effect.forEach(
         input.changes.tracked.filter((item) => !excluded.has(item)),
         (item) =>
@@ -511,7 +501,13 @@ const layer = Layer.effect(
             .pipe(Effect.map((found) => (found ? item : undefined))),
         { concurrency: 8 },
       )).filter((item): item is RelativePath => item !== undefined)
-      if (embedded.length) yield* add(embedded)
+      if (added.length)
+        yield* repositoryOperation(
+          "refresh",
+          input.repository,
+          ["update-index", "--add", "--remove", "--replace", "-z", "--stdin"],
+          { stdin: [...added, ...embedded].join("\0") + "\0", index: input.index },
+        )
       return { skipped }
     })
 
@@ -814,16 +810,30 @@ const layer = Layer.effect(
       paths?: readonly RelativePath[]
     }) {
       if (input.paths?.length === 0) return []
-      const args = ["--no-renames", input.from, input.to, "--", ...(input.paths ?? []).map(literalPathspec)]
+      const args = ["--no-renames", input.from, input.to, "--", ...(input.paths ?? [])]
       // Patch headers have no -z form: unquoted paths keep chunksByFile matching non-ASCII names.
       const [names, numbers, patch] = yield* Effect.all(
         [
-          repositoryOperation("diff", input.repository, ["diff", "--name-status", "-z", ...args]),
-          repositoryOperation("diff", input.repository, ["diff", "--numstat", "-z", ...args]),
+          repositoryOperation("diff", input.repository, [
+            "--literal-pathspecs",
+            "diff",
+            "--name-status",
+            "-z",
+            ...args,
+          ]),
+          repositoryOperation("diff", input.repository, ["--literal-pathspecs", "diff", "--numstat", "-z", ...args]),
           repositoryOperation(
             "diff",
             input.repository,
-            ["-c", "core.quotepath=false", "diff", "--no-ext-diff", `--unified=${input.context ?? 3}`, ...args],
+            [
+              "--literal-pathspecs",
+              "-c",
+              "core.quotepath=false",
+              "diff",
+              "--no-ext-diff",
+              `--unified=${input.context ?? 3}`,
+              ...args,
+            ],
             { maxOutputBytes: VcsPatch.MAX_TOTAL_PATCH_BYTES },
           ),
         ],
@@ -897,33 +907,34 @@ const layer = Layer.effect(
         ),
       )
 
-    /** Chunked to stay below argument limits. */
+    /**
+     * One ls-tree per tree. Windows caps a command line at 32,767 characters, so a
+     * selection too long to pass as arguments lists the whole tree instead.
+     */
     const pathsInTree = Effect.fnUntraced(function* (
       repository: Repository,
       tree: TreeID,
       files: readonly RelativePath[],
     ) {
-      const chunks = Array.from({ length: Math.ceil(files.length / 512) }, (_, index) =>
-        files.slice(index * 512, (index + 1) * 512),
+      const pathspecs = files.map(literalPathspec)
+      const fits = pathspecs.reduce((length, pathspec) => length + pathspec.length + 1, 0) <= 24_000
+      const result = yield* repositoryOperation(
+        "restore",
+        repository,
+        fits ? ["ls-tree", "-z", tree, "--", ...pathspecs] : ["ls-tree", "-r", "-t", "-z", "--full-tree", tree],
       )
-      const listed = yield* Effect.forEach(chunks, (chunk) =>
-        repositoryOperation("restore", repository, ["ls-tree", "-z", tree, "--", ...chunk.map(literalPathspec)]).pipe(
-          Effect.flatMap((result) =>
-            Effect.forEach(nuls(result.text), (record) => {
-              const match = /^\d+ \w+ [0-9a-f]+\t(.*)$/s.exec(record)
-              if (match) return Effect.succeed(match[1])
-              return Effect.fail(
-                new OperationError({
-                  operation: "restore",
-                  directory: repository.worktree,
-                  message: `Invalid tree entry: ${record}`,
-                }),
-              )
-            }),
-          ),
-        ),
-      )
-      return new Set(listed.flat())
+      const listed = yield* Effect.forEach(nuls(result.text), (record) => {
+        const match = /^\d+ \w+ [0-9a-f]+\t(.*)$/s.exec(record)
+        if (match) return Effect.succeed(RelativePath.make(match[1]!))
+        return Effect.fail(
+          new OperationError({
+            operation: "restore",
+            directory: repository.worktree,
+            message: `Invalid tree entry: ${record}`,
+          }),
+        )
+      })
+      return new Set(listed)
     })
 
     /** Batched paths cost one ls-tree and one checkout per source tree instead of two processes per file. */
@@ -1118,6 +1129,8 @@ const layer = Layer.effect(
             }),
         ),
       )
+      const parsed = packIndexObjectIDs(bytes)
+      if (parsed) return parsed
       const result = yield* repositoryOperation("pack", repository, ["show-index"], { stdin: bytes })
       return result.text.split("\n").flatMap((line) => {
         const oid = line.split(" ")[1]
@@ -1321,6 +1334,23 @@ function canBatchRestore(files: readonly string[]) {
     const parts = file.toLowerCase().split("/")
     return parts.slice(1).every((_, index) => !folded.has(parts.slice(0, index + 1).join("/")))
   })
+}
+
+/**
+ * Object IDs from a version 2 pack index: magic, version, a 256-entry fan-out
+ * table whose last entry is the object count, then the sorted IDs. Returns
+ * undefined for version 1 indexes and for packs with 64-bit offsets (over 2 GiB),
+ * whose hash length this size check cannot derive.
+ */
+function packIndexObjectIDs(bytes: Uint8Array) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  if (bytes.length < 1032 || view.getUint32(0) !== 0xff744f63 || view.getUint32(4) !== 2) return undefined
+  const count = view.getUint32(8 + 255 * 4)
+  const hash = (bytes.length - 1032 - 8 * count) / (count + 2)
+  if (hash !== 20 && hash !== 32) return undefined
+  return Array.from({ length: count }, (_, index) =>
+    Buffer.from(bytes.subarray(1032 + index * hash, 1032 + (index + 1) * hash)).toString("hex"),
+  )
 }
 
 function uniqueSuffix() {

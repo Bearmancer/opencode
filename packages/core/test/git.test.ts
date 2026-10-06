@@ -468,6 +468,24 @@ describe("Git capture recovery", () => {
     }),
   )
 
+  it.live("records a tracked file replaced by an embedded repository as a gitlink", () =>
+    Effect.gen(function* () {
+      const { project, repository, capture } = yield* setup
+      yield* capture()
+      yield* Effect.promise(async () => {
+        await fs.rm(path.join(project, "a.txt"))
+        await Bun.write(path.join(project, "a.txt", "inner.txt"), "inner\n")
+        await initRepo(path.join(project, "a.txt"))
+        await $`git add . && git commit -q -m inner`.cwd(path.join(project, "a.txt")).quiet()
+      })
+      const tree = yield* capture()
+      const entry = yield* Effect.promise(() =>
+        $`git --git-dir ${repository.gitDirectory} ls-tree ${tree} a.txt`.text(),
+      )
+      expect(entry).toStartWith("160000 commit ")
+    }),
+  )
+
   it.live("keeps the index when Git cannot even start", () =>
     Effect.gen(function* () {
       const { root, project, repository, capture } = yield* setup

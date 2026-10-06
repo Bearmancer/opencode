@@ -266,6 +266,34 @@ describe("Snapshot", () => {
     ),
   )
 
+  testEffect(Layer.empty).live("restores a selection too long for one command line", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          const project = path.join(tmp.path, "project")
+          const names = Array.from({ length: 300 }, (_, index) => `deep/${"n".repeat(90)}-${index}.txt`)
+          yield* Effect.promise(async () => {
+            await fs.mkdir(path.join(project, "deep"), { recursive: true })
+            await Promise.all(names.map((name) => fs.writeFile(path.join(project, name), "one\n")))
+            await initGit(project, true)
+          })
+          yield* Effect.gen(function* () {
+            const snapshot = yield* Snapshot.Service
+            const first = yield* snapshot.capture()
+            if (!first) throw new globalThis.Error("capture failed")
+            yield* Effect.promise(() =>
+              Promise.all(names.map((name) => fs.writeFile(path.join(project, name), "two\n"))),
+            )
+            yield* snapshot.restore({ files: new Map(names.map((name) => [RelativePath.make(name), first])) })
+            const contents = yield* Effect.forEach(names, (name) => read(path.join(project, name)))
+            expect(new Set(contents)).toEqual(new Set(["one\n"]))
+          }).pipe(Effect.provide(snapshotLayer(tmp.path, project)))
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
   testEffect(Layer.empty).live("restores the other files when removing one path fails", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
