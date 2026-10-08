@@ -312,3 +312,25 @@ export DISPLAY=:99.0
 ```
 
 opencode will detect if you're using Wayland and prefer `wl-clipboard`, otherwise it will try to find clipboard tools in order of: `xclip` and `xsel`.
+
+If copy shows "Copied to clipboard" but pasting gives old content, the backend is missing or unreachable: opencode now reports the exact cause instead of succeeding silently. Common cases:
+
+**Remote SSH sessions**
+
+Over SSH there is no local clipboard tool to use. Copy goes over the terminal channel (OSC52), so your terminal must support it:
+
+- Test support with: `printf '\033]52;c;%s\a' "$(echo -n 'test' | base64)"` — the word `test` should land in your clipboard.
+- iTerm2: Preferences > General > Selection > enable "Applications in terminal may access clipboard".
+- tmux: add `set -g allow-passthrough on` to `~/.tmux.conf`, then restart tmux (`tmux kill-server`).
+- Force the terminal-channel path with: `OPENCODE_CLIPBOARD=osc52 opencode`.
+
+**Force a specific backend**
+
+```bash
+OPENCODE_CLIPBOARD=native opencode  # OS tools only (xclip/wl-copy/pbcopy)
+OPENCODE_CLIPBOARD=osc52 opencode   # terminal channel only
+```
+
+**Fallback: terminal-native selection**
+
+Set `OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT=true`, then hold `Shift` while dragging to select (this bypasses the app's mouse handling) and copy with your terminal's own shortcut (usually `Ctrl+Shift+C`).
