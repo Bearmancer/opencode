@@ -36,10 +36,15 @@ export function copy(renderer: Renderer, toast: Toast, clipboard: ClipboardServi
 
   clipboard
     ?.write?.(clipboardText)
-    .then(() => toast.show({ message: "Copied to clipboard", variant: "info" }))
-    .catch(toast.error)
+    .then(() => {
+      toast.show({ message: "Copied to clipboard", variant: "info" })
+      renderer.clearSelection()
+    })
+    .catch((error) => {
+      // Keep the selection so the user can Shift-select / copy manually.
+      toast.error(error)
+    })
 
-  renderer.clearSelection()
   return true
 }
 

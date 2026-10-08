@@ -20,11 +20,59 @@ function command(command: string, args: string[] = [], input?: string) {
   })
 }
 
-function writeOsc52(text: string) {
-  if (!process.stdout.isTTY) return
+function writeOsc52(text: string): boolean {
+  if (!process.stdout.isTTY) return false
   const sequence = `\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`
-  const passthrough = `\x1bPtmux;\x1b${sequence}\x1b\\`
-  process.stdout.write(process.env.TMUX ? sequence + passthrough : process.env.STY ? passthrough : sequence)
+  if (process.env.TMUX) {
+    // Inside tmux only the wrapped passthrough reaches the outer terminal.
+    // Sending the raw sequence too causes double/appended copies.
+    process.stdout.write(`\x1bPtmux;\x1b${sequence}\x1b\\`)
+    return true
+  }
+  if (process.env.STY) {
+    process.stdout.write(`\x1bP${sequence}\x1b\\`)
+    return true
+  }
+  process.stdout.write(sequence)
+  return true
+}
+
+export function isSshSession(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env.SSH_TTY || env.SSH_CONNECTION || env.SSH_CLIENT)
+}
+
+export type ClipboardMode = "auto" | "native" | "osc52"
+
+export function resolveClipboardMode(env: NodeJS.ProcessEnv = process.env): ClipboardMode {
+  const raw = env.OPENCODE_CLIPBOARD?.toLowerCase()
+  if (raw === "native" || raw === "osc52" || raw === "auto") return raw
+  return "auto"
+}
+
+export function missingClipboardHint(os: NodeJS.Platform, wayland: boolean, ssh: boolean): string {
+  if (ssh) {
+    return (
+      "Clipboard copy failed: remote session has no local clipboard tool. " +
+      "Use a terminal with OSC52 support (iTerm2: Preferences > General > Selection > Applications in terminal may access clipboard; " +
+      "tmux: set -g allow-passthrough on) or test with: printf '\\033]52;c;%s\\a' \"$(echo -n 'test' | base64)\". " +
+      "Override with OPENCODE_CLIPBOARD=native|osc52."
+    )
+  }
+  if (os === "linux") {
+    if (wayland) {
+      return (
+        "Clipboard copy failed: no clipboard tool found. Install wl-clipboard (Wayland): sudo apt install wl-clipboard. " +
+        "Headless/SSH: use a terminal with OSC52 support or set OPENCODE_CLIPBOARD=osc52. " +
+        "See https://opencode.ai/docs/troubleshooting/#copypaste-not-working-on-linux"
+      )
+    }
+    return (
+      "Clipboard copy failed: no clipboard tool found (tried xclip, xsel). Install one (X11): sudo apt install xclip xsel. " +
+      "Wayland: sudo apt install wl-clipboard. Headless/SSH: use a terminal with OSC52 support or set OPENCODE_CLIPBOARD=osc52. " +
+      "See https://opencode.ai/docs/troubleshooting/#copypaste-not-working-on-linux"
+    )
+  }
+  return "Clipboard copy failed: no clipboard tool available."
 }
 
 export async function read() {
@@ -79,6 +127,9 @@ export function copyCommand(
   wayland: boolean,
   has: (name: string) => boolean,
 ): string[] | undefined {
+  // Prefer pbcopy on macOS: osascript string interpolation drops ${...},
+  // newlines and quotes (#4283). pbcopy takes stdin like every other backend.
+  if (os === "darwin" && has("pbcopy")) return ["pbcopy"]
   if (os === "darwin" && has("osascript")) return ["osascript"]
   if (os === "linux" && wayland && has("wl-copy")) return ["wl-copy"]
   if (os === "linux" && has("xclip")) return ["xclip", "-selection", "clipboard"]
@@ -94,32 +145,88 @@ export function copyCommand(
   }
 }
 
-let copyMethod: Promise<(text: string) => Promise<void>> | undefined
+let copyMethod: Promise<{ run: (text: string) => Promise<void>; name: string } | undefined> | undefined
 
-function getCopyMethod() {
+async function getCopyMethod(): Promise<{ run: (text: string) => Promise<void>; name: string } | undefined> {
   return (copyMethod ??= (async () => {
     const { which } = await import("@opencode-ai/core/util/which")
     const native = copyCommand(platform(), Boolean(process.env.WAYLAND_DISPLAY), (name) => Boolean(which(name)))
-    if (native?.[0] === "osascript") {
-      return async (text: string) => {
-        const escaped = text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
-        await command("osascript", ["-e", `set the clipboard to "${escaped}"`]).catch(() => undefined)
+    if (!native) return undefined
+    if (native[0] === "pbcopy") {
+      return {
+        name: "pbcopy",
+        run: async (text: string) => {
+          await command(native[0], native.slice(1), text)
+        },
       }
     }
-    if (native) {
-      return async (text: string) => {
-        await command(native[0], native.slice(1), text).catch(() => undefined)
+    if (native[0] === "osascript") {
+      // Legacy fallback when pbcopy is missing; quote carefully.
+      return {
+        name: "osascript",
+        run: async (text: string) => {
+          const escaped = text.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, '" & return & "')
+          await command("osascript", ["-e", `set the clipboard to "${escaped}"`])
+        },
       }
     }
-    return async (text: string) => {
-      const { default: clipboardy } = await import("clipboardy")
-      await clipboardy.write(text).catch(() => undefined)
+    return {
+      name: native[0],
+      run: async (text: string) => {
+        await command(native[0], native.slice(1), text)
+      },
     }
   })())
 }
 
-export async function write(text: string) {
-  writeOsc52(text)
-  const method = await getCopyMethod()
-  await method(text)
+export function resetClipboardCache() {
+  copyMethod = undefined
+}
+
+export async function write(text: string): Promise<void> {
+  const mode = resolveClipboardMode()
+  const ssh = isSshSession()
+  const os = platform()
+  const wayland = Boolean(process.env.WAYLAND_DISPLAY)
+
+  if (mode === "osc52") {
+    if (!writeOsc52(text)) {
+      throw new Error(
+        "Clipboard copy failed: no TTY for OSC52. " +
+          "Use a terminal with OSC52 support (iTerm2: Preferences > General > Selection > Applications in terminal may access clipboard; " +
+          "tmux: set -g allow-passthrough on).",
+      )
+    }
+    return
+  }
+
+  if (mode === "native" || !ssh) {
+    const method = await getCopyMethod()
+    if (method) {
+      try {
+        await method.run(text)
+      } catch {
+        throw new Error(missingClipboardHint(os, wayland, ssh))
+      }
+      // Do NOT mirror via OSC52 here: sending both by default causes
+      // double/appended copies and OS alert sounds (#4283). One path only.
+      return
+    }
+    if (os === "darwin" || os === "win32") {
+      try {
+        const { default: clipboardy } = await import("clipboardy")
+        await clipboardy.write(text)
+        return
+      } catch {
+        // Fall through to the actionable hint below.
+      }
+    }
+    throw new Error(missingClipboardHint(os, wayland, ssh))
+  }
+
+  // auto + SSH: local tools cannot reach the local clipboard; OSC52 is the
+  // only path. Do not attempt (and fail on) xclip/wl-copy headlessly.
+  if (!writeOsc52(text)) {
+    throw new Error(missingClipboardHint(os, wayland, true))
+  }
 }
