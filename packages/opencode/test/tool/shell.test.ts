@@ -341,6 +341,28 @@ describe("tool.shell permissions", () => {
     ),
   )
 
+  each("documents dynamic-path advisory gap for external_directory", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        // Related #2242: static `~` resolves and asks external_directory, but
+        // `$VAR` skips static collection and only asks bash. Advisory only.
+        const err = new Error("stop after permission")
+        const dynamicRequests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+        expect(
+          yield* fail(
+            {
+              command: "cat $HOME/.ssh/config",
+            },
+            capture(dynamicRequests, err),
+          ),
+        ).toMatchObject({ message: err.message })
+        expect(dynamicRequests.find((r) => r.permission === "external_directory")).toBeUndefined()
+        expect(dynamicRequests.find((r) => r.permission === "bash")).toBeDefined()
+      }),
+    ),
+  )
+
   if (process.platform === "win32") {
     if (bash) {
       it.live("asks for nested bash command permissions [bash]", () =>

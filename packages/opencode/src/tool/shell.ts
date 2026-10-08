@@ -367,6 +367,9 @@ export const ShellTool = Tool.define(
     })
 
     const argPath = Effect.fn("ShellTool.argPath")(function* (arg: string, cwd: string, ps: boolean, shell: string) {
+      // Advisory only, not a sandbox boundary (see #2242). Unresolvable
+      // dynamic args, symlinks, renames, and script-file bodies skip static
+      // collection below, so OS-level containment needs a real sandbox.
       const text = ps ? expand(arg, cwd, shell) : home(unquote(arg))
       const file = text && prefix(text)
       if (!file || dynamic(file, ps)) return
