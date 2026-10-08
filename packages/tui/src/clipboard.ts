@@ -127,8 +127,9 @@ export function copyCommand(
   wayland: boolean,
   has: (name: string) => boolean,
 ): string[] | undefined {
-  // Prefer pbcopy on macOS: osascript string interpolation drops ${...},
-  // newlines and quotes (#4283). pbcopy takes stdin like every other backend.
+  // Prefer pbcopy on macOS: osascript string interpolation breaks on
+  // newlines and quotes (syntax error, swallowed into silent no-copy).
+  // pbcopy takes stdin like every other backend.
   if (os === "darwin" && has("pbcopy")) return ["pbcopy"]
   if (os === "darwin" && has("osascript")) return ["osascript"]
   if (os === "linux" && wayland && has("wl-copy")) return ["wl-copy"]
