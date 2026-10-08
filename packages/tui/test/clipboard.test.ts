@@ -1,10 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import {
-  copyCommand,
-  isSshSession,
-  missingClipboardHint,
-  resolveClipboardMode,
-} from "../src/clipboard"
+import { copyCommand, isSshSession, missingClipboardHint, resolveClipboardMode } from "../src/clipboard"
 
 test("prefers Wayland clipboard when available", () => {
   expect(copyCommand("linux", true, (name) => name === "wl-copy")).toEqual(["wl-copy"])
