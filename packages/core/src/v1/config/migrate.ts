@@ -85,7 +85,7 @@ export function migrateMcp(info: ConfigMCPV1.Info) {
       cwd: info.cwd,
       environment: info.environment,
       disabled,
-      timeout: info.timeout === undefined ? undefined : { catalog: info.timeout, execution: info.timeout },
+      timeout: info.timeout === undefined ? undefined : { startup: info.timeout, catalog: info.timeout, execution: info.timeout },
     }
   return {
     type: info.type,
@@ -99,7 +99,7 @@ export function migrateMcp(info: ConfigMCPV1.Info) {
       redirect_uri: info.oauth.redirectUri,
     },
     disabled,
-    timeout: info.timeout === undefined ? undefined : { catalog: info.timeout, execution: info.timeout },
+    timeout: info.timeout === undefined ? undefined : { startup: info.timeout, catalog: info.timeout, execution: info.timeout },
   }
 }
 
