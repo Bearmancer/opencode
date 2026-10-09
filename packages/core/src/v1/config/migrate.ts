@@ -91,7 +91,6 @@ export function migrateMcp(info: ConfigMCPV1.Info) {
       environment: info.environment,
       disabled,
       timeout: info.timeout === undefined ? undefined : migrateMcpTimeout(info.timeout),
-      timeout: info.timeout === undefined ? undefined : { startup: info.timeout, catalog: info.timeout, execution: info.timeout },
     }
   return {
     type: info.type,
@@ -106,7 +105,6 @@ export function migrateMcp(info: ConfigMCPV1.Info) {
     },
     disabled,
     timeout: info.timeout === undefined ? undefined : migrateMcpTimeout(info.timeout),
-    timeout: info.timeout === undefined ? undefined : { startup: info.timeout, catalog: info.timeout, execution: info.timeout },
   }
 }
 
