@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { Schema } from "effect"
 import { Config } from "../src/config.js"
 import { ConfigAgent } from "../src/config/agent.js"
+import { ConfigLSP } from "../src/config/lsp.js"
 import { ConfigMCP } from "../src/config/mcp.js"
 import { ConfigProvider } from "../src/config/provider.js"
 import { Mcp } from "../src/mcp.js"
@@ -138,5 +139,24 @@ describe("Config.Entry", () => {
     expect(docs.oauth).not.toHaveProperty("client_id")
     expect(encoded.info.providers?.custom).not.toHaveProperty("headers")
     expect(encoded.info.providers?.custom).not.toHaveProperty("canonical")
+  })
+
+  test("accepts custom LSP server root configuration and round-trips it", () => {
+    const serverWithRoot = {
+      command: ["custom-lsp-server", "--stdio"],
+      extensions: [".custom"],
+      root: "workspace",
+    }
+    const decoded = Schema.decodeUnknownSync(ConfigLSP.Server)(serverWithRoot)
+    expect(decoded.root).toBe("workspace")
+    expect(Schema.encodeSync(ConfigLSP.Server)(decoded)).toEqual(serverWithRoot)
+
+    const serverWithoutRoot = {
+      command: ["custom-lsp-server", "--stdio"],
+      extensions: [".custom"],
+    }
+    const decodedWithoutRoot = Schema.decodeUnknownSync(ConfigLSP.Server)(serverWithoutRoot)
+    expect(decodedWithoutRoot.root).toBeUndefined()
+    expect(Schema.encodeSync(ConfigLSP.Server)(decodedWithoutRoot)).toEqual(serverWithoutRoot)
   })
 })

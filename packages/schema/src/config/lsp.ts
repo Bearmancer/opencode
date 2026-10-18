@@ -13,6 +13,10 @@ export class Server extends Schema.Class<Server>("Config.LSP.Server")({
   disabled: Schema.Boolean.pipe(optional),
   env: Schema.Record(Schema.String, Schema.String).pipe(optional),
   initialization: Schema.Record(Schema.String, Schema.Unknown).pipe(optional),
+  root: Schema.String.annotate({
+    description:
+      "Root directory resolution mode or path. Custom servers default to the workspace root directory (ctx.directory) without marker gating.",
+  }).pipe(optional),
 }) {}
 
 export const Entry = Schema.Union([Disabled, Server])

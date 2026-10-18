@@ -99,13 +99,14 @@ Each configured LSP server entry supports the following:
 
 Server entries need `command` unless they only disable a server.
 
-| Property         | Type     | Description                                       |
-| ---------------- | -------- | ------------------------------------------------- |
-| `disabled`       | boolean  | Set this to `true` to disable the LSP server      |
-| `command`        | string[] | The command to start the LSP server               |
-| `extensions`     | string[] | File extensions this LSP server should handle     |
-| `env`            | object   | Environment variables to set when starting server |
-| `initialization` | object   | Initialization options to send to the LSP server  |
+| Property         | Type     | Description                                                                                                    |
+| ---------------- | -------- | -------------------------------------------------------------------------------------------------------------- |
+| `disabled`       | boolean  | Set this to `true` to disable the LSP server                                                                  |
+| `command`        | string[] | The command to start the LSP server                                                                           |
+| `extensions`     | string[] | File extensions this LSP server should handle                                                                 |
+| `env`            | object   | Environment variables to set when starting server                                                             |
+| `initialization` | object   | Initialization options to send to the LSP server                                                              |
+| `root`           | string   | Root directory resolution for the server. Defaults to workspace root (`ctx.directory`) for custom server IDs   |
 
 Let's look at some examples.
 
@@ -195,6 +196,27 @@ You can add custom LSP servers by specifying the command and file extensions:
     "custom-lsp": {
       "command": ["custom-lsp-server", "--stdio"],
       "extensions": [".custom"]
+    }
+  }
+}
+```
+
+#### Root directory resolution
+
+Built-in LSP servers use marker file gating (`NearestRoot`) to detect project roots (such as `package.json`, `Cargo.toml`, or `go.mod`), stopping at the workspace directory.
+
+In contrast, any custom LSP server configuration whose ID does not match a built-in server resolves its root to `ctx.directory` (the workspace root directory) by default. This causes custom servers to activate globally across the entire workspace directory without requiring language-specific marker files.
+
+You can also explicitly configure `root` on a server entry:
+
+```json title="opencode.json" {6}
+{
+  "$schema": "https://opencode.ai/config.json",
+  "lsp": {
+    "custom-lsp": {
+      "command": ["custom-lsp-server", "--stdio"],
+      "extensions": [".custom"],
+      "root": "workspace"
     }
   }
 }
