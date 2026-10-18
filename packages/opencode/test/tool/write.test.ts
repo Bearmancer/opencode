@@ -276,4 +276,62 @@ describe("tool.write", () => {
       }),
     )
   })
+
+  describe("cold start diagnostics", () => {
+    const coldStartLsp = Layer.succeed(
+      LSP.Service,
+      LSP.Service.of({
+        init: () => Effect.void,
+        status: () => Effect.succeed([]),
+        hasClients: () => Effect.succeed(true),
+        touchFile: () =>
+          Effect.succeed([
+            {
+              serverID: "typescript",
+              ready: false,
+              reason: "timeout",
+            },
+          ]),
+        diagnostics: () => Effect.succeed({}),
+        hover: () => Effect.succeed([]),
+        definition: () => Effect.succeed([]),
+        references: () => Effect.succeed([]),
+        implementation: () => Effect.succeed([]),
+        documentSymbol: () => Effect.succeed([]),
+        workspaceSymbol: () => Effect.succeed([]),
+        prepareCallHierarchy: () => Effect.succeed([]),
+        incomingCalls: () => Effect.succeed([]),
+        outgoingCalls: () => Effect.succeed([]),
+      }),
+    )
+
+    const itCold = testEffect(
+      LayerNode.compile(
+        LayerNode.group([
+          LSP.node,
+          FSUtil.node,
+          EventV2Bridge.node,
+          Format.node,
+          CrossSpawnSpawner.node,
+          Truncate.node,
+          Agent.node,
+        ]),
+        [[LSP.node, coldStartLsp]],
+      ),
+    )
+
+    itCold.instance(
+      "surfaces server initializing warning instead of silent false clean on cold-start timeout",
+      () =>
+        Effect.gen(function* () {
+          const test = yield* TestInstance
+          const filepath = path.join(test.directory, "coldstart.ts")
+          const result = yield* run({ filePath: filepath, content: "const a: number = 'string';" })
+
+          expect(result.output).toContain("Wrote file successfully.")
+          expect(result.output).toContain("Note: No diagnostics received (server still initializing: typescript).")
+          expect(result.metadata.unreadyServers).toEqual(["typescript"])
+        }),
+    )
+  })
 })

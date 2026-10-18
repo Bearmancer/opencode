@@ -72,7 +72,7 @@ export const WriteTool = Tool.define(
           })
 
           let output = "Wrote file successfully."
-          yield* lsp.touchFile(filepath, "document")
+          const touchResults = (yield* lsp.touchFile(filepath, "document")) as LSP.TouchResult[] | undefined
           const diagnostics = yield* lsp.diagnostics()
           const normalizedFilepath = FSUtil.normalizePath(filepath)
           let projectDiagnosticsCount = 0
@@ -89,12 +89,21 @@ export const WriteTool = Tool.define(
             output += `\n\nLSP errors detected in other files:\n${block}`
           }
 
+          const hasCurrentFileDiagnostics = Object.entries(diagnostics).some(
+            ([file, issues]) => file === normalizedFilepath && issues.length > 0,
+          )
+          const unready = touchResults?.filter((r) => !r.ready) ?? []
+          if (!hasCurrentFileDiagnostics && unready.length > 0) {
+            output += `\n\nNote: No diagnostics received (server still initializing: ${unready.map((u) => u.serverID).join(", ")}).`
+          }
+
           return {
             title: path.relative(instance.worktree, filepath),
             metadata: {
               diagnostics,
               filepath,
               exists: exists,
+              ...(unready.length > 0 ? { unreadyServers: unready.map((u) => u.serverID) } : {}),
             },
             output,
           }

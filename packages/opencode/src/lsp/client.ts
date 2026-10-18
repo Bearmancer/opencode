@@ -507,15 +507,16 @@ export async function create(input: {
 
     while (Date.now() - startedAt < DIAGNOSTICS_DOCUMENT_WAIT_TIMEOUT_MS) {
       const result = await requestDocumentDiagnostics(request.path)
-      if (result.matched) return
+      if (result.matched) return { ready: true }
       const remaining = DIAGNOSTICS_DOCUMENT_WAIT_TIMEOUT_MS - (Date.now() - startedAt)
-      if (remaining <= 0) return
+      if (remaining <= 0) return { ready: false, reason: "timeout" }
       const next = await Promise.race([
         pushWait.then((ready) => (ready ? "push" : ("timeout" as const))),
         waitForRegistrationChange(remaining).then((changed) => (changed ? "registration" : ("timeout" as const))),
       ])
-      if (next !== "registration") return
+      if (next !== "registration") return { ready: next === "push", reason: next === "push" ? undefined : "timeout" }
     }
+    return { ready: false, reason: "timeout" }
   }
 
   async function waitForFullDiagnostics(request: { path: string; version: number; after?: number }) {
@@ -529,15 +530,16 @@ export async function create(input: {
 
     while (Date.now() - startedAt < DIAGNOSTICS_FULL_WAIT_TIMEOUT_MS) {
       const result = await requestFullDiagnostics(request.path)
-      if (result.handled || result.matched) return
+      if (result.handled || result.matched) return { ready: true }
       const remaining = DIAGNOSTICS_FULL_WAIT_TIMEOUT_MS - (Date.now() - startedAt)
-      if (remaining <= 0) return
+      if (remaining <= 0) return { ready: false, reason: "timeout" }
       const next = await Promise.race([
         pushWait.then((ready) => (ready ? "push" : ("timeout" as const))),
         waitForRegistrationChange(remaining).then((changed) => (changed ? "registration" : ("timeout" as const))),
       ])
-      if (next !== "registration") return
+      if (next !== "registration") return { ready: next === "push", reason: next === "push" ? undefined : "timeout" }
     }
+    return { ready: false, reason: "timeout" }
   }
 
   // --- Public API ---
@@ -632,10 +634,9 @@ export async function create(input: {
         path.isAbsolute(request.path) ? request.path : path.resolve(input.directory, request.path),
       )
       if (request.mode === "document") {
-        await waitForDocumentDiagnostics({ path: normalizedPath, version: request.version, after: request.after })
-        return
+        return await waitForDocumentDiagnostics({ path: normalizedPath, version: request.version, after: request.after })
       }
-      await waitForFullDiagnostics({ path: normalizedPath, version: request.version, after: request.after })
+      return await waitForFullDiagnostics({ path: normalizedPath, version: request.version, after: request.after })
     },
     async shutdown() {
       connection.end()
