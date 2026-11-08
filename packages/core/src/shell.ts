@@ -22,6 +22,7 @@ import { SessionSchema } from "./session/schema.js"
 import { Config } from "./config.js"
 import { ToolOutput } from "./tool-output.js"
 import { ShellResult } from "./shell/result.js"
+import { markNotContentIndexed } from "./shell/not-indexed.js"
 
 export class NotFoundError extends Schema.TaggedError<NotFoundError>()("Shell.NotFoundError", {
   id: Shell.ID,
@@ -147,6 +148,9 @@ const layer = () =>
       const { mkdir, unlink } = yield* Effect.promise(() => import("fs/promises"))
       const { createWriteStream, createReadStream } = yield* Effect.promise(() => import("fs"))
       yield* Effect.promise(() => mkdir(outputDir, { recursive: true }))
+      // Issue #62678: keep the spool tree out of Windows Search indexing. This is
+      // best-effort (a no-op off Windows); each spool file is marked on creation too.
+      yield* Effect.promise(() => markNotContentIndexed(outputDir))
 
       yield* Effect.addFinalizer(() =>
         Effect.gen(function* () {
@@ -386,7 +390,12 @@ const layer = () =>
               yield* Effect.promise(
                 () =>
                   new Promise<void>((resolve) => {
-                    stream.once("open", () => resolve())
+                    stream.once("open", () => {
+                      // The attribute is not inherited by later files, so every spool file
+                      // is marked itself as soon as it exists; never fails the shell tool.
+                      void markNotContentIndexed(file)
+                      resolve()
+                    })
                     stream.once("error", () => resolve())
                   }),
               )
